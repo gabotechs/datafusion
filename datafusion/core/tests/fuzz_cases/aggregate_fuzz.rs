@@ -37,6 +37,8 @@ use datafusion::physical_plan::memory::MemoryExec;
 use datafusion::physical_plan::{collect, displayable, ExecutionPlan};
 use datafusion::prelude::{DataFrame, SessionConfig, SessionContext};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::HashMap;
+use datafusion_common_runtime::JoinSet;
 use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_physical_expr::expressions::col;
 use datafusion_physical_expr::PhysicalSortExpr;
@@ -46,12 +48,10 @@ use test_utils::{add_empty_batches, StringBatchGenerator};
 use crate::fuzz_cases::aggregation_fuzzer::{
     AggregationFuzzerBuilder, ColumnDescr, DatasetGeneratorConfig, QueryBuilder,
 };
-use datafusion_common::HashMap;
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
 use rand::rngs::StdRng;
 use rand::{thread_rng, Rng, SeedableRng};
 use std::str;
-use tokio::task::JoinSet;
 
 // ========================================================================
 //  The new aggregation fuzz tests based on [`AggregationFuzzer`]
