@@ -71,6 +71,7 @@ use datafusion::{
     error::Result, logical_expr::utils::split_conjunction, prelude::Column,
     scalar::ScalarValue,
 };
+use prost::Message;
 use std::collections::HashSet;
 use std::sync::Arc;
 use substrait::proto;
@@ -2501,6 +2502,9 @@ fn from_substrait_type(
                         match name.as_ref() {
                             // Kept for backwards compatibility, producers should use IntervalCompound instead
                             INTERVAL_MONTH_DAY_NANO_TYPE_NAME => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
+                            // TODO: Make UserDefined type lookup injectable in the upstream
+                            "group" => Ok(DataType::new_list(DataType::Utf8, false)),
+                            "json" => Ok(DataType::Utf8),
                             _ => not_impl_err!(
                                 "Unsupported Substrait user defined type with ref {} and variation {}",
                                 u.type_reference,
@@ -3021,6 +3025,34 @@ fn from_substrait_literal(
                     )))
                 };
 
+            let group = |user_defined: &proto::expression::literal::UserDefined| -> Result<ScalarValue> {
+                let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
+                    return substrait_err!("Group value is empty");
+                };
+                let list =
+                    proto::expression::literal::List::decode(raw_val.value.as_ref())
+                        .map_err(|e| {
+                            substrait_datafusion_err!("Failed to parse group value: {e}")
+                        })?;
+                let mut values = vec![];
+                for literal in list.values {
+                    if let Some(LiteralType::String(v)) = literal.literal_type {
+                        values.push(ScalarValue::Utf8(Some(v)));
+                    } else {
+                        return Err(substrait_datafusion_err!(
+                            "Inner values of group literals can only be strings, but found {:?}",
+                            literal.literal_type
+                        ));
+                    };
+                }
+
+                Ok(ScalarValue::List(ScalarValue::new_list(
+                    &values,
+                    &DataType::Utf8,
+                    false,
+                )))
+            };
+
             if let Some(name) = consumer
                 .get_extensions()
                 .types
@@ -3032,6 +3064,8 @@ fn from_substrait_literal(
                     INTERVAL_MONTH_DAY_NANO_TYPE_NAME => {
                         interval_month_day_nano(user_defined)?
                     }
+                    // TODO:  Make UserDefined type lookup injectable in the upstream
+                    "group" => group(user_defined)?,
                     _ => {
                         return not_impl_err!(
                         "Unsupported Substrait user defined type with ref {} and name {}",
