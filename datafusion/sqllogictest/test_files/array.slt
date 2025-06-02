@@ -3070,6 +3070,12 @@ select array_concat([]);
 ----
 []
 
+# test with null casted to an array of a specific type
+query ?
+select array_concat(NULL::integer[]);
+----
+NULL
+
 # Concatenating strings arrays
 query ?
 select array_concat(

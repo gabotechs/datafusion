@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::make_array::make_array_inner;
 use crate::utils::{align_array_dimensions, check_datatypes, make_scalar_function};
 use arrow::array::{
-    Array, ArrayRef, Capacities, GenericListArray, MutableArrayData, NullArray,
+    Array, ArrayData, ArrayRef, Capacities, GenericListArray, MutableArrayData,
     NullBufferBuilder, OffsetSizeTrait,
 };
 use arrow::buffer::OffsetBuffer;
@@ -364,12 +364,16 @@ pub(crate) fn array_concat_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
             DataType::LargeList(_) => large_list = true,
             _ => (),
         }
-
-        all_null = false
+        if (0..arg.len()).any(|i| arg.is_valid(i)) {
+            all_null = false;
+        }
     }
 
     if all_null {
-        Ok(Arc::new(NullArray::new(args[0].len())))
+        Ok(arrow::array::make_array(ArrayData::new_null(
+            args[0].data_type(),
+            args[0].len(),
+        )))
     } else if large_list {
         concat_internal::<i64>(args)
     } else {
