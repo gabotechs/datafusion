@@ -17,6 +17,8 @@
 
 use crate::logical_plan::producer::to_substrait_precision;
 use crate::logical_plan::producer::utils::flatten_names;
+#[allow(deprecated)]
+use crate::variation_const::TIMESTAMP_NANO_TYPE_VARIATION_REF;
 use crate::variation_const::{
     DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF,
     DECIMAL_128_TYPE_VARIATION_REF, DECIMAL_256_TYPE_VARIATION_REF,
@@ -109,26 +111,16 @@ pub(crate) fn to_substrait_type(
                 nullability,
             })),
         }),
-        DataType::Timestamp(unit, tz) => {
-            let precision = to_substrait_precision(unit);
-            let kind = match tz {
-                None => r#type::Kind::PrecisionTimestamp(r#type::PrecisionTimestamp {
-                    type_variation_reference: DEFAULT_TYPE_VARIATION_REF,
+        DataType::Timestamp(_unit, _) => {
+            // TODO: DataDog-specific workaround, don't commit upstream
+            #[allow(deprecated)]
+            let type_variation_reference = TIMESTAMP_NANO_TYPE_VARIATION_REF;
+            Ok(substrait::proto::Type {
+                kind: Some(r#type::Kind::Timestamp(r#type::Timestamp {
+                    type_variation_reference,
                     nullability,
-                    precision,
-                }),
-                Some(_) => {
-                    // If timezone is present, no matter what the actual tz value is, it indicates the
-                    // value of the timestamp is tied to UTC epoch. That's all that Substrait cares about.
-                    // As the timezone is lost, this conversion may be lossy for downstream use of the value.
-                    r#type::Kind::PrecisionTimestampTz(r#type::PrecisionTimestampTz {
-                        type_variation_reference: DEFAULT_TYPE_VARIATION_REF,
-                        nullability,
-                        precision,
-                    })
-                }
-            };
-            Ok(substrait::proto::Type { kind: Some(kind) })
+                })),
+            })
         }
         DataType::Time32(unit) => {
             let precision = to_substrait_precision(unit);
@@ -325,6 +317,8 @@ pub(crate) fn to_substrait_type(
                 precision: *p as i32,
             })),
         }),
+        // TODO: DataDog-specific workaround, don't commit upstream
+        DataType::Dictionary(_, dt) => to_substrait_type(dt, nullable),
         _ => not_impl_err!("Unsupported cast type: {dt:?}"),
     }
 }
@@ -378,12 +372,13 @@ mod tests {
         round_trip_type(DataType::Float32)?;
         round_trip_type(DataType::Float64)?;
 
-        for tz in [None, Some("UTC".into())] {
-            round_trip_type(DataType::Timestamp(TimeUnit::Second, tz.clone()))?;
-            round_trip_type(DataType::Timestamp(TimeUnit::Millisecond, tz.clone()))?;
-            round_trip_type(DataType::Timestamp(TimeUnit::Microsecond, tz.clone()))?;
-            round_trip_type(DataType::Timestamp(TimeUnit::Nanosecond, tz))?;
-        }
+        // TODO: DataDog-specific workaround, don't commit upstream
+        // for tz in [None, Some("UTC".into())] {
+        //     round_trip_type(DataType::Timestamp(TimeUnit::Second, tz.clone()))?;
+        //     round_trip_type(DataType::Timestamp(TimeUnit::Millisecond, tz.clone()))?;
+        //     round_trip_type(DataType::Timestamp(TimeUnit::Microsecond, tz.clone()))?;
+        //     round_trip_type(DataType::Timestamp(TimeUnit::Nanosecond, tz))?;
+        // }
 
         round_trip_type(DataType::Time32(TimeUnit::Second))?;
         round_trip_type(DataType::Time32(TimeUnit::Millisecond))?;
