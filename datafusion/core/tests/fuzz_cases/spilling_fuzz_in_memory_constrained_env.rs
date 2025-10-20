@@ -306,6 +306,7 @@ async fn run_sort_test_with_limited_memory(
         }])
         .unwrap(),
         plan,
+        args.task_ctx.session_config().get_extension(),
     ));
 
     let result = sort_exec.execute(0, Arc::clone(&args.task_ctx))?;

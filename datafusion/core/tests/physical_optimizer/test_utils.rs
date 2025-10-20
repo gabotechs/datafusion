@@ -379,7 +379,7 @@ pub fn sort_exec_with_preserve_partitioning(
     ordering: LexOrdering,
     input: Arc<dyn ExecutionPlan>,
 ) -> Arc<dyn ExecutionPlan> {
-    Arc::new(SortExec::new(ordering, input).with_preserve_partitioning(true))
+    Arc::new(SortExec::new(ordering, input, None).with_preserve_partitioning(true))
 }
 
 pub fn sort_exec_with_fetch(
@@ -387,7 +387,7 @@ pub fn sort_exec_with_fetch(
     fetch: Option<usize>,
     input: Arc<dyn ExecutionPlan>,
 ) -> Arc<dyn ExecutionPlan> {
-    Arc::new(SortExec::new(ordering, input).with_fetch(fetch))
+    Arc::new(SortExec::new(ordering, input, None).with_fetch(fetch))
 }
 
 pub fn projection_exec(

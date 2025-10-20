@@ -67,6 +67,7 @@ pub use datafusion_physical_expr_common::sort_expr::{
     PhysicalSortRequirement,
 };
 
+pub use expressions::DynamicFiltersRegistry;
 pub use planner::{create_physical_expr, create_physical_exprs};
 pub use scalar_function::ScalarFunctionExpr;
 pub use simplifier::PhysicalExprSimplifier;

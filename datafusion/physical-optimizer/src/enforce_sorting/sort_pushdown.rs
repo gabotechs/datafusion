@@ -26,7 +26,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{internal_err, HashSet, JoinSide, Result};
 use datafusion_expr::JoinType;
-use datafusion_physical_expr::expressions::Column;
+use datafusion_physical_expr::expressions::{Column, DynamicFiltersRegistry};
 use datafusion_physical_expr::utils::collect_columns;
 use datafusion_physical_expr::{
     add_offset_to_physical_sort_exprs, EquivalenceProperties,
@@ -76,9 +76,12 @@ pub fn assign_initial_requirements(sort_push_down: &mut SortPushDown) {
 }
 
 /// Tries to push down the sort requirements as far as possible, if decides a `SortExec` is unnecessary removes it.
-pub fn pushdown_sorts(sort_push_down: SortPushDown) -> Result<SortPushDown> {
+pub fn pushdown_sorts(
+    sort_push_down: SortPushDown,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
+) -> Result<SortPushDown> {
     sort_push_down
-        .transform_down(pushdown_sorts_helper)
+        .transform_down(|plan| pushdown_sorts_helper(plan, registry))
         .map(|transformed| transformed.data)
 }
 
@@ -93,6 +96,7 @@ fn min_fetch(f1: Option<usize>, f2: Option<usize>) -> Option<usize> {
 
 fn pushdown_sorts_helper(
     mut sort_push_down: SortPushDown,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
 ) -> Result<Transformed<SortPushDown>> {
     let plan = sort_push_down.plan;
     let parent_fetch = sort_push_down.data.fetch;
@@ -117,7 +121,7 @@ fn pushdown_sorts_helper(
                 Some(OrderingRequirements::from(sort_ordering));
             // Recursive call to helper, so it doesn't transform_down and miss
             // the new node (previous child of sort):
-            return pushdown_sorts_helper(sort_push_down);
+            return pushdown_sorts_helper(sort_push_down, registry);
         }
         sort_push_down.plan = plan;
         return Ok(Transformed::no(sort_push_down));
@@ -153,6 +157,7 @@ fn pushdown_sorts_helper(
                 sort_push_down,
                 parent_requirement.into_single(),
                 parent_fetch,
+                registry.clone(),
             );
             // Update pushdown requirements:
             sort_push_down.children[0].data = ParentRequirements {
@@ -175,7 +180,7 @@ fn pushdown_sorts_helper(
             };
             // Recursive call to helper, so it doesn't transform_down and miss
             // the new node (previous child of sort):
-            return pushdown_sorts_helper(sort_push_down);
+            return pushdown_sorts_helper(sort_push_down, registry);
         }
     }
 
@@ -207,6 +212,7 @@ fn pushdown_sorts_helper(
             sort_push_down,
             parent_requirement.into_single(),
             parent_fetch,
+            registry.clone(),
         );
         assign_initial_requirements(&mut sort_push_down);
     }

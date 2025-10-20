@@ -64,6 +64,7 @@ use datafusion_optimizer::{
     Analyzer, AnalyzerRule, Optimizer, OptimizerConfig, OptimizerRule,
 };
 use datafusion_physical_expr::create_physical_expr;
+use datafusion_physical_expr::expressions::DynamicFiltersRegistry;
 use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion_physical_optimizer::PhysicalOptimizerRule;
@@ -1375,7 +1376,9 @@ impl SessionStateBuilder {
             physical_optimizer_rules,
         } = self;
 
-        let config = config.unwrap_or_default();
+        let config = config
+            .unwrap_or_default()
+            .with_extension(Arc::new(DynamicFiltersRegistry::default()));
         let runtime_env = runtime_env.unwrap_or_else(|| Arc::new(RuntimeEnv::default()));
 
         let mut state = SessionState {

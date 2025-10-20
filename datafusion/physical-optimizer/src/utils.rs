@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use datafusion_common::Result;
+use datafusion_physical_expr::expressions::DynamicFiltersRegistry;
 use datafusion_physical_expr::{LexOrdering, LexRequirement};
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
@@ -39,6 +40,7 @@ pub fn add_sort_above<T: Clone + Default>(
     node: PlanContext<T>,
     sort_requirements: LexRequirement,
     fetch: Option<usize>,
+    registry: Option<Arc<DynamicFiltersRegistry>>,
 ) -> PlanContext<T> {
     let mut sort_reqs: Vec<_> = sort_requirements.into();
     sort_reqs.retain(|sort_expr| {
@@ -51,7 +53,8 @@ pub fn add_sort_above<T: Clone + Default>(
     let Some(ordering) = LexOrdering::new(sort_exprs) else {
         return node;
     };
-    let mut new_sort = SortExec::new(ordering, Arc::clone(&node.plan)).with_fetch(fetch);
+    let mut new_sort =
+        SortExec::new(ordering, Arc::clone(&node.plan), registry).with_fetch(fetch);
     if node.plan.output_partitioning().partition_count() > 1 {
         new_sort = new_sort.with_preserve_partitioning(true);
     }
@@ -65,13 +68,19 @@ pub fn add_sort_above_with_check<T: Clone + Default>(
     node: PlanContext<T>,
     sort_requirements: LexRequirement,
     fetch: Option<usize>,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
 ) -> Result<PlanContext<T>> {
     if !node
         .plan
         .equivalence_properties()
         .ordering_satisfy_requirement(sort_requirements.clone())?
     {
-        Ok(add_sort_above(node, sort_requirements, fetch))
+        Ok(add_sort_above(
+            node,
+            sort_requirements,
+            fetch,
+            registry.clone(),
+        ))
     } else {
         Ok(node)
     }

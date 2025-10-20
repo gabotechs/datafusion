@@ -17,6 +17,7 @@
 
 use arrow::datatypes::SchemaRef;
 use arrow::{array::RecordBatch, compute::concat_batches};
+use datafusion::execution::SessionStateBuilder;
 use datafusion::{datasource::object_store::ObjectStoreUrl, physical_plan::PhysicalExpr};
 use datafusion_common::{internal_err, Result, Statistics};
 use datafusion_datasource::{
@@ -383,16 +384,17 @@ impl OptimizationTest {
         O: PhysicalOptimizerRule,
     {
         let mut parquet_pushdown_config = SessionConfig::default();
-        parquet_pushdown_config
-            .options_mut()
-            .execution
-            .parquet
-            .pushdown_filters = allow_pushdown_filters;
+        let opts = parquet_pushdown_config.options_mut();
+        opts.execution.parquet.pushdown_filters = allow_pushdown_filters;
+        opts.optimizer.enable_dynamic_filter_pushdown = allow_pushdown_filters;
+        let session_state = SessionStateBuilder::new()
+            .with_config(parquet_pushdown_config)
+            .build();
 
         let input = format_execution_plan(&input_plan);
         let input_schema = input_plan.schema();
 
-        let output_result = opt.optimize(input_plan, &parquet_pushdown_config);
+        let output_result = opt.optimize(input_plan, session_state.config());
         let output = output_result
             .and_then(|plan| {
                 if opt.schema_check() && (plan.schema() != input_schema) {

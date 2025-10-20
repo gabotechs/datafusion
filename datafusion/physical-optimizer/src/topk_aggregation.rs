@@ -85,7 +85,10 @@ impl TopKAggregation {
         Some(Arc::new(new_aggr))
     }
 
-    fn transform_sort(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
+    fn transform_sort(
+        plan: &Arc<dyn ExecutionPlan>,
+        config: &SessionConfig,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
         let sort = plan.as_any().downcast_ref::<SortExec>()?;
 
         let children = sort.children();
@@ -131,7 +134,7 @@ impl TopKAggregation {
             Ok(Transformed::no(plan))
         };
         let child = Arc::clone(child).transform_down(closure).data().ok()?;
-        let sort = SortExec::new(sort.expr().clone(), child)
+        let sort = SortExec::new(sort.expr().clone(), child, config.get_extension())
             .with_fetch(sort.fetch())
             .with_preserve_partitioning(sort.preserve_partitioning());
         Some(Arc::new(sort))
@@ -152,11 +155,13 @@ impl PhysicalOptimizerRule for TopKAggregation {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if config.options().optimizer.enable_topk_aggregation {
             plan.transform_down(|plan| {
-                Ok(if let Some(plan) = TopKAggregation::transform_sort(&plan) {
-                    Transformed::yes(plan)
-                } else {
-                    Transformed::no(plan)
-                })
+                Ok(
+                    if let Some(plan) = TopKAggregation::transform_sort(&plan, config) {
+                        Transformed::yes(plan)
+                    } else {
+                        Transformed::no(plan)
+                    },
+                )
             })
             .data()
         } else {

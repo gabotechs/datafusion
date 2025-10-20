@@ -121,8 +121,9 @@ impl EnforceSortingTest {
         {
             let plan_requirements =
                 PlanWithCorrespondingSort::new_default(Arc::clone(&self.plan));
+            let registry = session_config.get_extension();
             let adjusted = plan_requirements
-                .transform_up(ensure_sorting)
+                .transform_up(|plan| ensure_sorting(plan, &registry))
                 .data()
                 .and_then(check_integrity)
                 .expect("check_integrity failed after ensure_sorting");
@@ -132,7 +133,7 @@ impl EnforceSortingTest {
                 let plan_with_coalesce_partitions =
                     PlanWithCorrespondingCoalescePartitions::new_default(adjusted.plan);
                 let parallel = plan_with_coalesce_partitions
-                    .transform_up(parallelize_sorts)
+                    .transform_up(|plan| parallelize_sorts(plan, &registry))
                     .data()
                     .and_then(check_integrity)
                     .expect("check_integrity failed after parallelize_sorts");
@@ -163,7 +164,8 @@ impl EnforceSortingTest {
             let mut sort_pushdown = SortPushDown::new_default(updated_plan.plan);
             assign_initial_requirements(&mut sort_pushdown);
             check_integrity(
-                pushdown_sorts(sort_pushdown).expect("pushdown_sorts failed"),
+                pushdown_sorts(sort_pushdown, &session_config.get_extension())
+                    .expect("pushdown_sorts failed"),
             )
             .expect("check_integrity failed after pushdown_sorts");
             // TODO: End state payloads will be checked here.
@@ -1908,7 +1910,7 @@ async fn test_remove_unnecessary_sort3() -> Result<()> {
     ]
     .into();
     let sort2 = Arc::new(
-        SortExec::new(ordering2.clone(), repartition_exec)
+        SortExec::new(ordering2.clone(), repartition_exec, None)
             .with_preserve_partitioning(true),
     ) as _;
     let spm2 = sort_preserving_merge_exec(ordering2, sort2);
@@ -1946,9 +1948,9 @@ async fn test_remove_unnecessary_sort4() -> Result<()> {
     let source2 = repartition_exec(memory_exec(&schema));
     let union = union_exec(vec![source1, source2]);
     let ordering: LexOrdering = [sort_expr("non_nullable_col", &schema)].into();
-    let sort =
-        Arc::new(SortExec::new(ordering.clone(), union).with_preserve_partitioning(true))
-            as _;
+    let sort = Arc::new(
+        SortExec::new(ordering.clone(), union, None).with_preserve_partitioning(true),
+    ) as _;
     let spm = sort_preserving_merge_exec(ordering, sort);
     let filter = filter_exec(
         Arc::new(NotExpr::new(col("non_nullable_col", schema.as_ref())?)),
@@ -2312,7 +2314,8 @@ async fn test_coalesce_propagate() -> Result<()> {
     let ordering: LexOrdering = [sort_expr("nullable_col", &schema)].into();
     // Add local sort
     let sort = Arc::new(
-        SortExec::new(ordering.clone(), repartition).with_preserve_partitioning(true),
+        SortExec::new(ordering.clone(), repartition, None)
+            .with_preserve_partitioning(true),
     ) as _;
     let spm = sort_preserving_merge_exec(ordering.clone(), sort);
     let sort = sort_exec(ordering, spm);
@@ -2595,7 +2598,7 @@ fn test_parallelize_sort_preserves_fetch() -> Result<()> {
         )],
     );
 
-    let res = parallelize_sorts(requirements)?;
+    let res = parallelize_sorts(requirements, &None)?;
 
     // Verify fetch was preserved
     assert_eq!(

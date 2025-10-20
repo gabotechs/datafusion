@@ -71,7 +71,9 @@ use datafusion_functions_aggregate_common::min_max::{MaxAccumulator, MinAccumula
 use datafusion_physical_expr::equivalence::{
     join_equivalence_properties, ProjectionMapping,
 };
-use datafusion_physical_expr::expressions::{lit, DynamicFilterPhysicalExpr};
+use datafusion_physical_expr::expressions::{
+    lit, DynamicFilterPhysicalExpr, DynamicFiltersRegistry,
+};
 use datafusion_physical_expr::{PhysicalExpr, PhysicalExprRef};
 
 use ahash::RandomState;
@@ -463,12 +465,20 @@ impl HashJoinExec {
         })
     }
 
-    fn create_dynamic_filter(on: &JoinOn) -> Arc<DynamicFilterPhysicalExpr> {
+    fn create_dynamic_filter(
+        on: &JoinOn,
+        registry: Arc<DynamicFiltersRegistry>,
+    ) -> Arc<DynamicFilterPhysicalExpr> {
         // Extract the right-side keys (probe side keys) from the `on` clauses
         // Dynamic filter will be created from build side values (left side) and applied to probe side (right side)
         let right_keys: Vec<_> = on.iter().map(|(_, r)| Arc::clone(r)).collect();
         // Initialize with a placeholder expression (true) that will be updated when the hash table is built
-        Arc::new(DynamicFilterPhysicalExpr::new(right_keys, lit(true)))
+        Arc::new(DynamicFilterPhysicalExpr::new(
+            right_keys,
+            lit(true),
+            registry,
+            None,
+        ))
     }
 
     /// left (build) side which gets hashed
@@ -1143,7 +1153,11 @@ impl ExecutionPlan for HashJoinExec {
                 .enable_join_dynamic_filter_pushdown
         {
             // Add actual dynamic filter to right side (probe side)
-            let dynamic_filter = Self::create_dynamic_filter(&self.on);
+            let Some(registry) = config.get_extension() else {
+                return internal_err!("Dynamic filters are enabled, but no DynamicFilterRegistry was found in SessionConfig");
+            };
+            let dynamic_filter =
+                Self::create_dynamic_filter(&self.on, Arc::clone(&registry));
             right_child = right_child.with_self_filter(dynamic_filter);
         }
 

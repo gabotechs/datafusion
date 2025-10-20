@@ -22,13 +22,14 @@ use self::from_proto::parse_protobuf_partitioning;
 use self::to_proto::{serialize_partitioning, serialize_physical_expr};
 use crate::common::{byte_to_string, str_to_byte};
 use crate::physical_plan::from_proto::{
-    parse_physical_expr, parse_physical_sort_expr, parse_physical_sort_exprs,
-    parse_physical_window_expr, parse_protobuf_file_scan_config, parse_record_batches,
+    parse_dynamic_filter, parse_physical_expr, parse_physical_sort_expr,
+    parse_physical_sort_exprs, parse_physical_window_expr,
+    parse_protobuf_file_scan_config, parse_record_batches,
 };
 use crate::physical_plan::to_proto::{
-    serialize_file_scan_config, serialize_maybe_filter, serialize_physical_aggr_expr,
-    serialize_physical_sort_exprs, serialize_physical_window_expr,
-    serialize_record_batches,
+    serialize_dynamic_filter, serialize_file_scan_config, serialize_maybe_filter,
+    serialize_physical_aggr_expr, serialize_physical_sort_exprs,
+    serialize_physical_window_expr, serialize_record_batches,
 };
 use crate::protobuf::physical_aggregate_expr_node::AggregateFunction;
 use crate::protobuf::physical_expr_node::ExprType;
@@ -1405,10 +1406,10 @@ impl protobuf::PhysicalPlanNode {
         &self,
         sort: &protobuf::SortExecNode,
         ctx: &TaskContext,
-
         extension_codec: &dyn PhysicalExtensionCodec,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input = into_physical_plan(&sort.input, ctx, extension_codec)?;
+        let schema = input.schema();
         let exprs = sort
             .expr
             .iter()
@@ -1429,7 +1430,7 @@ impl protobuf::PhysicalPlanNode {
                         })?
                         .as_ref();
                     Ok(PhysicalSortExpr {
-                        expr: parse_physical_expr(expr, ctx, input.schema().as_ref(), extension_codec)?,
+                        expr: parse_physical_expr(expr, ctx, &schema, extension_codec)?,
                         options: SortOptions {
                             descending: !sort_expr.asc,
                             nulls_first: sort_expr.nulls_first,
@@ -1446,9 +1447,16 @@ impl protobuf::PhysicalPlanNode {
             return internal_err!("SortExec requires an ordering");
         };
         let fetch = (sort.fetch >= 0).then_some(sort.fetch as _);
-        let new_sort = SortExec::new(ordering, input)
-            .with_fetch(fetch)
-            .with_preserve_partitioning(sort.preserve_partitioning);
+
+        let filter = match &sort.filter {
+            Some(v) => Some(parse_dynamic_filter(v, ctx, &schema, extension_codec)?),
+            None => None,
+        };
+        let new_sort =
+            SortExec::new(ordering, input, ctx.session_config().get_extension())
+                .with_preserve_partitioning(sort.preserve_partitioning)
+                .with_filter(filter)
+                .with_fetch(fetch);
 
         Ok(Arc::new(new_sort))
     }
@@ -2740,6 +2748,11 @@ impl protobuf::PhysicalPlanNode {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+
+        let filter = match exec.filter() {
+            Some(v) => Some(serialize_dynamic_filter(&v.read().expr(), extension_codec)?),
+            None => None,
+        };
         Ok(protobuf::PhysicalPlanNode {
             physical_plan_type: Some(PhysicalPlanType::Sort(Box::new(
                 protobuf::SortExecNode {
@@ -2750,6 +2763,7 @@ impl protobuf::PhysicalPlanNode {
                         _ => -1,
                     },
                     preserve_partitioning: exec.preserve_partitioning(),
+                    filter,
                 },
             ))),
         })

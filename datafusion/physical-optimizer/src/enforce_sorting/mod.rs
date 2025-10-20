@@ -71,6 +71,7 @@ use datafusion_physical_plan::windows::{
 };
 use datafusion_physical_plan::{ExecutionPlan, ExecutionPlanProperties, InputOrderMode};
 
+use datafusion_physical_expr::expressions::DynamicFiltersRegistry;
 use itertools::izip;
 
 /// This rule inspects [`SortExec`]'s in the given physical plan in order to
@@ -216,12 +217,15 @@ impl PhysicalOptimizerRule for EnforceSorting {
         let plan_requirements = PlanWithCorrespondingSort::new_default(plan);
         // Execute a bottom-up traversal to enforce sorting requirements,
         // remove unnecessary sorts, and optimize sort-sensitive operators:
-        let adjusted = plan_requirements.transform_up(ensure_sorting)?.data;
+        let registry = config.get_extension();
+        let adjusted = plan_requirements
+            .transform_up(|plan| ensure_sorting(plan, &registry))?
+            .data;
         let new_plan = if config_options.optimizer.repartition_sorts {
             let plan_with_coalesce_partitions =
                 PlanWithCorrespondingCoalescePartitions::new_default(adjusted.plan);
             let parallel = plan_with_coalesce_partitions
-                .transform_up(parallelize_sorts)
+                .transform_up(|plan| parallelize_sorts(plan, &registry))
                 .data()?;
             parallel.plan
         } else {
@@ -243,7 +247,7 @@ impl PhysicalOptimizerRule for EnforceSorting {
         // missed by the bottom-up traversal:
         let mut sort_pushdown = SortPushDown::new_default(updated_plan.plan);
         assign_initial_requirements(&mut sort_pushdown);
-        let adjusted = pushdown_sorts(sort_pushdown)?;
+        let adjusted = pushdown_sorts(sort_pushdown, &config.get_extension())?;
         adjusted
             .plan
             .transform_up(|plan| Ok(Transformed::yes(replace_with_partial_sort(plan)?)))
@@ -390,6 +394,7 @@ fn replace_with_partial_sort(
 ///        If so, remove (see `remove_bottleneck_in_subplan`).
 pub fn parallelize_sorts(
     mut requirements: PlanWithCorrespondingCoalescePartitions,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
 ) -> Result<Transformed<PlanWithCorrespondingCoalescePartitions>> {
     update_coalesce_ctx_children(&mut requirements);
 
@@ -418,7 +423,8 @@ pub fn parallelize_sorts(
         // deals with the children and their children and so on.
         requirements = requirements.children.swap_remove(0);
 
-        requirements = add_sort_above_with_check(requirements, sort_reqs, fetch)?;
+        requirements =
+            add_sort_above_with_check(requirements, sort_reqs, fetch, registry)?;
 
         let spm =
             SortPreservingMergeExec::new(sort_exprs, Arc::clone(&requirements.plan));
@@ -475,6 +481,7 @@ pub fn parallelize_sorts(
 ///          decides this SPM is unnecessary and removes it from the plan.
 pub fn ensure_sorting(
     mut requirements: PlanWithCorrespondingSort,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
 ) -> Result<Transformed<PlanWithCorrespondingSort>> {
     requirements = update_sort_ctx_children_data(requirements, false)?;
 
@@ -514,6 +521,7 @@ pub fn ensure_sorting(
                         .downcast_ref::<OutputRequirementExec>()
                         .map(|output| output.fetch())
                         .unwrap_or(None),
+                    registry.clone(),
                 );
                 child = update_sort_ctx_children_data(child, true)?;
             }
@@ -533,7 +541,7 @@ pub fn ensure_sorting(
     // calculate the result in reverse:
     let child_node = &requirements.children[0];
     if is_window(&requirements.plan) && child_node.data {
-        return adjust_window_sort_removal(requirements).map(Transformed::yes);
+        return adjust_window_sort_removal(requirements, registry).map(Transformed::yes);
     } else if is_sort_preserving_merge(&requirements.plan)
         && child_node.plan.output_partitioning().partition_count() <= 1
     {
@@ -606,6 +614,7 @@ fn analyze_immediate_sort_removal(
 /// whether it may allow removing a sort.
 fn adjust_window_sort_removal(
     mut window_tree: PlanWithCorrespondingSort,
+    registry: &Option<Arc<DynamicFiltersRegistry>>,
 ) -> Result<PlanWithCorrespondingSort> {
     // Window operators have a single child we need to adjust:
     let child_node = remove_corresponding_sort_from_sub_plan(
@@ -645,7 +654,8 @@ fn adjust_window_sort_removal(
         // Satisfy the ordering requirement so that the window can run:
         let mut child_node = window_tree.children.swap_remove(0);
         if let Some(reqs) = reqs {
-            child_node = add_sort_above(child_node, reqs.into_single(), None);
+            child_node =
+                add_sort_above(child_node, reqs.into_single(), None, registry.clone());
         }
         let child_plan = Arc::clone(&child_node.plan);
         window_tree.children.push(child_node);

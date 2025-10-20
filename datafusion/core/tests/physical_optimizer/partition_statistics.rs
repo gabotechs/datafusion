@@ -271,7 +271,7 @@ mod test {
             Arc::new(Column::new("id", 0)),
             SortOptions::new(false, false),
         )];
-        let sort = SortExec::new(ordering.clone().into(), scan_1);
+        let sort = SortExec::new(ordering.clone().into(), scan_1, None);
         let sort_exec: Arc<dyn ExecutionPlan> = Arc::new(sort);
         let statistics = (0..sort_exec.output_partitioning().partition_count())
             .map(|idx| sort_exec.partition_statistics(Some(idx)))
@@ -288,7 +288,7 @@ mod test {
         let scan_2 = create_scan_exec_with_statistics(None, Some(2)).await;
         // Add sort execution plan
         let sort_exec: Arc<dyn ExecutionPlan> = Arc::new(
-            SortExec::new(ordering.into(), scan_2).with_preserve_partitioning(true),
+            SortExec::new(ordering.into(), scan_2, None).with_preserve_partitioning(true),
         );
         let expected_statistic_partition_1 =
             create_partition_statistics(2, 110, 3, 4, true);

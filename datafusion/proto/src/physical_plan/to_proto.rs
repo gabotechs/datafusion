@@ -32,9 +32,9 @@ use datafusion_datasource_json::file_format::JsonSink;
 #[cfg(feature = "parquet")]
 use datafusion_datasource_parquet::file_format::ParquetSink;
 use datafusion_expr::WindowFrame;
+use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion_physical_expr::window::{SlidingAggregateWindowExpr, StandardWindowExpr};
 use datafusion_physical_expr::ScalarFunctionExpr;
-use datafusion_physical_expr_common::physical_expr::snapshot_physical_expr;
 use datafusion_physical_expr_common::sort_expr::PhysicalSortExpr;
 use datafusion_physical_plan::expressions::LikeExpr;
 use datafusion_physical_plan::expressions::{
@@ -46,8 +46,8 @@ use datafusion_physical_plan::windows::{PlainAggregateWindowExpr, WindowUDFExpr}
 use datafusion_physical_plan::{Partitioning, PhysicalExpr, WindowExpr};
 
 use crate::protobuf::{
-    self, physical_aggregate_expr_node, physical_window_expr_node, PhysicalSortExprNode,
-    PhysicalSortExprNodeCollection,
+    self, physical_aggregate_expr_node, physical_window_expr_node,
+    PhysicalDynamicFilterNode, PhysicalSortExprNode, PhysicalSortExprNodeCollection,
 };
 
 use super::PhysicalExtensionCodec;
@@ -221,9 +221,6 @@ pub fn serialize_physical_expr(
     value: &Arc<dyn PhysicalExpr>,
     codec: &dyn PhysicalExtensionCodec,
 ) -> Result<protobuf::PhysicalExprNode> {
-    // Snapshot the expr in case it has dynamic predicate state so
-    // it can be serialized
-    let value = snapshot_physical_expr(Arc::clone(value))?;
     let expr = value.as_any();
 
     if let Some(expr) = expr.downcast_ref::<Column>() {
@@ -383,6 +380,12 @@ pub fn serialize_physical_expr(
                     )?)),
                 },
             ))),
+        })
+    } else if let Some(expr) = expr.downcast_ref::<DynamicFilterPhysicalExpr>() {
+        Ok(protobuf::PhysicalExprNode {
+            expr_type: Some(protobuf::physical_expr_node::ExprType::DynamicFilter(
+                Box::new(serialize_dynamic_filter(expr, codec)?),
+            )),
         })
     } else {
         let mut buf: Vec<u8> = vec![];
@@ -566,6 +569,17 @@ pub fn serialize_maybe_filter(
             expr: Some(serialize_physical_expr(&expr, codec)?),
         }),
     }
+}
+
+pub fn serialize_dynamic_filter(
+    expr: &DynamicFilterPhysicalExpr,
+    codec: &dyn PhysicalExtensionCodec,
+) -> Result<PhysicalDynamicFilterNode> {
+    Ok(protobuf::PhysicalDynamicFilterNode {
+        children: serialize_physical_exprs(expr.children(), codec)?,
+        inner: Some(Box::new(serialize_physical_expr(&expr.current()?, codec)?)),
+        id: expr.id().into_bytes().to_vec(),
+    })
 }
 
 pub fn serialize_record_batches(batches: &[RecordBatch]) -> Result<Vec<u8>> {

@@ -765,6 +765,7 @@ mod tests {
         let sort_exec = Arc::new(SortExec::new(
             partial_sort_exec.expr.clone(),
             Arc::clone(&partial_sort_exec.input),
+            task_ctx.session_config().get_extension(),
         ));
         let result = collect(Arc::new(partial_sort_exec), Arc::clone(&task_ctx)).await?;
         assert_eq!(
@@ -828,6 +829,7 @@ mod tests {
                 SortExec::new(
                     partial_sort_exec.expr.clone(),
                     Arc::clone(&partial_sort_exec.input),
+                    task_ctx.session_config().get_extension(),
                 )
                 .with_fetch(fetch_size),
             );

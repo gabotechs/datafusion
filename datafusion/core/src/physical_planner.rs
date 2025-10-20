@@ -930,7 +930,12 @@ impl DefaultPhysicalPlanner {
                         "SortExec requires at least one sort expression"
                     );
                 };
-                let new_sort = SortExec::new(ordering, physical_input).with_fetch(*fetch);
+                let new_sort = SortExec::new(
+                    ordering,
+                    physical_input,
+                    session_state.config().get_extension(),
+                )
+                .with_fetch(*fetch);
                 Arc::new(new_sort)
             }
             LogicalPlan::Subquery(_) => todo!(),

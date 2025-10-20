@@ -62,7 +62,9 @@ use datafusion_common::{
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
-use datafusion_physical_expr::expressions::{lit, DynamicFilterPhysicalExpr};
+use datafusion_physical_expr::expressions::{
+    lit, DynamicFilterPhysicalExpr, DynamicFiltersRegistry,
+};
 use datafusion_physical_expr::LexOrdering;
 use datafusion_physical_expr::PhysicalExpr;
 
@@ -899,12 +901,20 @@ pub struct SortExec {
     /// If `fetch` is `Some`, this will also be set and a TopK operator may be used.
     /// If `fetch` is `None`, this will be `None`.
     filter: Option<Arc<RwLock<TopKDynamicFilters>>>,
+    /// Registry containing the values of they dynamic filters. [SortExec] might crate a dynamic
+    /// filter when a specific `fetch` value is set, and this is the [DynamicFiltersRegistry] that
+    /// will be used for holding values of that dynamic filter.
+    dynamic_filters_registry: Option<Arc<DynamicFiltersRegistry>>,
 }
 
 impl SortExec {
     /// Create a new sort execution plan that produces a single,
     /// sorted output partition.
-    pub fn new(expr: LexOrdering, input: Arc<dyn ExecutionPlan>) -> Self {
+    pub fn new(
+        expr: LexOrdering,
+        input: Arc<dyn ExecutionPlan>,
+        dynamic_filters_registry: Option<Arc<DynamicFiltersRegistry>>,
+    ) -> Self {
         let preserve_partitioning = false;
         let (cache, sort_prefix) =
             Self::compute_properties(&input, expr.clone(), preserve_partitioning)
@@ -918,7 +928,25 @@ impl SortExec {
             common_sort_prefix: sort_prefix,
             cache,
             filter: None,
+            dynamic_filters_registry,
         }
+    }
+
+    /// Returns the dynamic filter in this [SortExec] if any.
+    pub fn filter(&self) -> Option<&Arc<RwLock<TopKDynamicFilters>>> {
+        self.filter.as_ref()
+    }
+
+    /// Sets the dynamic filter in this [SortExec]
+    pub fn with_filter(mut self, filter: Option<DynamicFilterPhysicalExpr>) -> Self {
+        let Some(filter) = filter else {
+            self.filter = None;
+            return self;
+        };
+        self.filter = Some(Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
+            filter,
+        )))));
+        self
     }
 
     /// Whether this `SortExec` preserves partitioning of the children
@@ -951,8 +979,9 @@ impl SortExec {
             .iter()
             .map(|sort_expr| Arc::clone(&sort_expr.expr))
             .collect::<Vec<_>>();
+        let registry = self.dynamic_filters_registry.clone().unwrap_or_default();
         Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
-            DynamicFilterPhysicalExpr::new(children, lit(true)),
+            DynamicFilterPhysicalExpr::new(children, lit(true), registry, None),
         ))))
     }
 
@@ -966,6 +995,7 @@ impl SortExec {
             fetch: self.fetch,
             cache: self.cache.clone(),
             filter: self.filter.clone(),
+            dynamic_filters_registry: self.dynamic_filters_registry.clone(),
         }
     }
 
@@ -976,7 +1006,7 @@ impl SortExec {
     /// This can reduce the memory pressure required by the sort
     /// operation since rows that are not going to be included
     /// can be dropped.
-    pub fn with_fetch(&self, fetch: Option<usize>) -> Self {
+    pub fn with_fetch(mut self, fetch: Option<usize>) -> Self {
         let mut cache = self.cache.clone();
         // If the SortExec can emit incrementally (that means the sort requirements
         // and properties of the input match), the SortExec can generate its result
@@ -992,11 +1022,10 @@ impl SortExec {
             // If we already have a filter, keep it. Otherwise, create a new one.
             self.filter.clone().unwrap_or_else(|| self.create_filter())
         });
-        let mut new_sort = self.cloned();
-        new_sort.fetch = fetch;
-        new_sort.cache = cache;
-        new_sort.filter = filter;
-        new_sort
+        self.fetch = fetch;
+        self.cache = cache;
+        self.filter = filter;
+        self
     }
 
     /// Input schema
@@ -1303,7 +1332,7 @@ impl ExecutionPlan for SortExec {
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
-        Some(Arc::new(SortExec::with_fetch(self, limit)))
+        Some(Arc::new(SortExec::with_fetch(self.cloned(), limit)))
     }
 
     fn fetch(&self) -> Option<usize> {
@@ -1334,11 +1363,14 @@ impl ExecutionPlan for SortExec {
         else {
             return Ok(None);
         };
-
         Ok(Some(Arc::new(
-            SortExec::new(updated_exprs, make_with_child(projection, self.input())?)
-                .with_fetch(self.fetch())
-                .with_preserve_partitioning(self.preserve_partitioning()),
+            SortExec::new(
+                updated_exprs,
+                make_with_child(projection, self.input())?,
+                self.dynamic_filters_registry.clone(),
+            )
+            .with_fetch(self.fetch())
+            .with_preserve_partitioning(self.preserve_partitioning()),
         )))
     }
 
@@ -1529,6 +1561,7 @@ mod tests {
             }]
             .into(),
             Arc::new(CoalescePartitionsExec::new(csv)),
+            task_ctx.session_config().get_extension(),
         ));
 
         let result = collect(sort_exec, Arc::clone(&task_ctx)).await?;
@@ -1575,6 +1608,7 @@ mod tests {
             }]
             .into(),
             Arc::new(CoalescePartitionsExec::new(input)),
+            task_ctx.session_config().get_extension(),
         ));
 
         let result = collect(
@@ -1650,6 +1684,7 @@ mod tests {
         let sort_exec = Arc::new(SortExec::new(
             [PhysicalSortExpr::new_default(col("i", &plan.schema())?)].into(),
             plan,
+            task_ctx.session_config().get_extension(),
         ));
 
         let result = collect(Arc::clone(&sort_exec) as _, Arc::clone(&task_ctx)).await;
@@ -1697,6 +1732,7 @@ mod tests {
             }]
             .into(),
             Arc::new(CoalescePartitionsExec::new(input)),
+            task_ctx.session_config().get_extension(),
         ));
 
         let result = collect(Arc::clone(&sort_exec) as _, Arc::clone(&task_ctx)).await?;
@@ -1794,6 +1830,7 @@ mod tests {
                     }]
                     .into(),
                     Arc::new(CoalescePartitionsExec::new(csv)),
+                    task_ctx.session_config().get_extension(),
                 )
                 .with_fetch(fetch),
             );
@@ -1840,6 +1877,7 @@ mod tests {
             }]
             .into(),
             input,
+            task_ctx.session_config().get_extension(),
         ));
 
         let result: Vec<RecordBatch> = collect(sort_exec, task_ctx).await?;
@@ -1904,6 +1942,7 @@ mod tests {
             ]
             .into(),
             TestMemoryExec::try_new_exec(&[vec![batch]], Arc::clone(&schema), None)?,
+            task_ctx.session_config().get_extension(),
         ));
 
         assert_eq!(DataType::Int32, *sort_exec.schema().field(0).data_type());
@@ -1991,6 +2030,7 @@ mod tests {
             ]
             .into(),
             TestMemoryExec::try_new_exec(&[vec![batch]], schema, None)?,
+            task_ctx.session_config().get_extension(),
         ));
 
         assert_eq!(DataType::Float32, *sort_exec.schema().field(0).data_type());
@@ -2059,6 +2099,7 @@ mod tests {
             }]
             .into(),
             blocking_exec,
+            task_ctx.session_config().get_extension(),
         ));
 
         let fut = collect(sort_exec, Arc::clone(&task_ctx));
@@ -2110,6 +2151,7 @@ mod tests {
             )))]
             .into(),
             Arc::new(source),
+            task_ctx.session_config().get_extension(),
         );
         plan = plan.with_fetch(Some(9));
 
@@ -2377,6 +2419,7 @@ mod tests {
         let sort_exec: Arc<dyn ExecutionPlan> = Arc::new(SortExec::new(
             ordering.clone(),
             TestMemoryExec::try_new_exec(std::slice::from_ref(&batches), schema, None)?,
+            task_ctx.session_config().get_extension(),
         ));
 
         let sorted_batches =

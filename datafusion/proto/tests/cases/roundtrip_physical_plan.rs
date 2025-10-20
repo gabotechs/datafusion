@@ -128,6 +128,16 @@ fn roundtrip_test(exec_plan: Arc<dyn ExecutionPlan>) -> Result<()> {
     Ok(())
 }
 
+/// Same as [roundtrip_test], but with a context provided by the user.
+fn roundtrip_test_ctx(
+    exec_plan: Arc<dyn ExecutionPlan>,
+    ctx: SessionContext,
+) -> Result<()> {
+    let codec = DefaultPhysicalExtensionCodec {};
+    roundtrip_test_and_return(exec_plan, &ctx, &codec)?;
+    Ok(())
+}
+
 /// Perform a serde roundtrip and assert that the string representation of the before and after plans
 /// are identical. Note that this often isn't sufficient to guarantee that no information is
 /// lost during serde because the string representation of a plan often only shows a subset of state.
@@ -796,10 +806,15 @@ fn roundtrip_sort() -> Result<()> {
         },
     ]
     .into();
-    roundtrip_test(Arc::new(SortExec::new(
-        sort_exprs,
-        Arc::new(EmptyExec::new(schema)),
-    )))
+    let ctx = SessionContext::new();
+    roundtrip_test_ctx(
+        Arc::new(SortExec::new(
+            sort_exprs,
+            Arc::new(EmptyExec::new(schema)),
+            ctx.task_ctx().session_config().get_extension(),
+        )),
+        ctx,
+    )
 }
 
 #[test]
@@ -825,15 +840,28 @@ fn roundtrip_sort_preserve_partitioning() -> Result<()> {
     ]
     .into();
 
-    roundtrip_test(Arc::new(SortExec::new(
-        sort_exprs.clone(),
-        Arc::new(EmptyExec::new(schema.clone())),
-    )))?;
+    let ctx = SessionContext::new();
+    roundtrip_test_ctx(
+        Arc::new(SortExec::new(
+            sort_exprs.clone(),
+            Arc::new(EmptyExec::new(schema.clone())),
+            ctx.task_ctx().session_config().get_extension(),
+        )),
+        ctx,
+    )?;
 
-    roundtrip_test(Arc::new(
-        SortExec::new(sort_exprs, Arc::new(EmptyExec::new(schema)))
+    let ctx = SessionContext::new();
+    roundtrip_test_ctx(
+        Arc::new(
+            SortExec::new(
+                sort_exprs,
+                Arc::new(EmptyExec::new(schema)),
+                ctx.task_ctx().session_config().get_extension(),
+            )
             .with_preserve_partitioning(true),
-    ))
+        ),
+        ctx,
+    )
 }
 
 #[test]
@@ -2263,4 +2291,33 @@ async fn roundtrip_listing_table_with_schema_metadata() -> Result<()> {
         .await?;
 
     roundtrip_test(plan)
+}
+
+#[tokio::test]
+async fn roundtrip_dynamic_filter_expr() -> Result<()> {
+    use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
+
+    let ctx = SessionContext::new();
+
+    let field_a = Field::new("a", DataType::Int64, false);
+    let field_b = Field::new("b", DataType::Boolean, false);
+    let schema = Arc::new(Schema::new(vec![field_a, field_b]));
+    let input = Arc::new(EmptyExec::new(schema.clone()));
+
+    // Create a dynamic filter with children and inner expression
+    let children = vec![binary(col("a", &schema)?, Operator::Gt, lit(10), &schema)?];
+    let inner = lit(true);
+    let registry = ctx
+        .task_ctx()
+        .session_config()
+        .get_extension()
+        .unwrap_or_default();
+    let dynamic_filter_expr = Arc::new(DynamicFilterPhysicalExpr::new(
+        children, inner, registry, None,
+    ));
+
+    // Create a filter exec that uses the dynamic filter
+    let filter_exec = Arc::new(FilterExec::try_new(dynamic_filter_expr, input)?);
+
+    roundtrip_test_ctx(filter_exec, ctx)
 }

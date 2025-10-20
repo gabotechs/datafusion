@@ -42,6 +42,7 @@ use datafusion_datasource_parquet::file_format::ParquetSink;
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_execution::{FunctionRegistry, TaskContext};
 use datafusion_expr::WindowFunctionDefinition;
+use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr, ScalarFunctionExpr};
 use datafusion_physical_plan::expressions::{
     in_list, BinaryExpr, CaseExpr, CastExpr, Column, IsNotNullExpr, IsNullExpr, LikeExpr,
@@ -50,6 +51,7 @@ use datafusion_physical_plan::expressions::{
 use datafusion_physical_plan::windows::{create_window_expr, schema_add_window_field};
 use datafusion_physical_plan::{Partitioning, PhysicalExpr, WindowExpr};
 use datafusion_proto_common::common::proto_error;
+use uuid::Uuid;
 
 use crate::convert_required;
 use crate::logical_plan::{self};
@@ -398,6 +400,9 @@ pub fn parse_physical_expr(
                 codec,
             )?,
         )),
+        ExprType::DynamicFilter(dyn_filter) => {
+            Arc::new(parse_dynamic_filter(&dyn_filter, ctx, input_schema, codec)?)
+        }
         ExprType::Extension(extension) => {
             let inputs: Vec<Arc<dyn PhysicalExpr>> = extension
                 .inputs
@@ -552,6 +557,22 @@ pub fn parse_protobuf_file_scan_config(
         .with_batch_size(proto.batch_size.map(|s| s as usize))
         .build();
     Ok(config)
+}
+
+pub fn parse_dynamic_filter(
+    node: &protobuf::PhysicalDynamicFilterNode,
+    ctx: &TaskContext,
+    schema: &Schema,
+    codec: &dyn PhysicalExtensionCodec,
+) -> Result<DynamicFilterPhysicalExpr> {
+    Ok(DynamicFilterPhysicalExpr::new(
+        parse_physical_exprs(&node.children, ctx, schema, codec)?,
+        parse_required_physical_expr(node.inner.as_deref(), ctx, "inner", schema, codec)?,
+        ctx.session_config().get_extension().unwrap_or_default(),
+        Uuid::from_slice(&node.id)
+            .map(Some)
+            .map_err(|_| proto_error("Invalid UUID in dynamic filter"))?,
+    ))
 }
 
 pub fn parse_record_batches(buf: &[u8]) -> Result<Vec<RecordBatch>> {

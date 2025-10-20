@@ -1439,6 +1439,7 @@ fn test_sort_after_projection() -> Result<()> {
         ]
         .into(),
         csv,
+        None,
     );
     let projection: Arc<dyn ExecutionPlan> = Arc::new(ProjectionExec::try_new(
         vec![

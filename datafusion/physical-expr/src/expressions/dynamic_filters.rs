@@ -20,12 +20,44 @@ use std::{any::Any, fmt::Display, hash::Hash, sync::Arc};
 
 use crate::PhysicalExpr;
 use arrow::datatypes::{DataType, Schema};
+use dashmap::mapref::one::{Ref, RefMut};
+use dashmap::DashMap;
 use datafusion_common::{
+    internal_err,
     tree_node::{Transformed, TransformedResult, TreeNode},
     Result,
 };
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr_common::physical_expr::{DynEq, DynHash};
+use uuid::Uuid;
+
+/// Registry that stores the dynamic values for they [DynamicFilterPhysicalExpr]s. This registry
+/// is shared across a session, and dynamic filters within a query will place their updates here
+/// so that the consumer part side of the dynamic filters can read them.
+///
+/// Having a global registry with the dynamic values allows us to not depend on pointer equivalence
+/// for communicating dynamic filter producers and consumers, which means that, as long as the
+/// registry is shared, they can be serialized/deserialized and they will still work.
+#[derive(Debug, Default)]
+pub struct DynamicFiltersRegistry {
+    entries: DashMap<Uuid, Inner>,
+}
+
+impl DynamicFiltersRegistry {
+    fn get_or_err(&self, id: &Uuid) -> Result<Ref<'_, Uuid, Inner>> {
+        let Some(entry) = self.entries.get(id) else {
+            return internal_err!("Dynamic filter with id {id} not found in registry");
+        };
+        Ok(entry)
+    }
+
+    fn get_mut_or_err(&self, id: &Uuid) -> Result<RefMut<'_, Uuid, Inner>> {
+        let Some(entry) = self.entries.get_mut(id) else {
+            return internal_err!("Dynamic filter with id {id} not found in registry");
+        };
+        Ok(entry)
+    }
+}
 
 /// A dynamic [`PhysicalExpr`] that can be updated by anyone with a reference to it.
 ///
@@ -42,8 +74,10 @@ pub struct DynamicFilterPhysicalExpr {
     /// If any of the children were remapped / modified (e.g. to adjust for projections) we need to keep track of the new children
     /// so that when we update `current()` in subsequent iterations we can re-apply the replacements.
     remapped_children: Option<Vec<Arc<dyn PhysicalExpr>>>,
-    /// The source of dynamic filters.
-    inner: Arc<RwLock<Inner>>,
+    /// Identifier of the dynamic filter in the [DynamicFiltersRegistry].
+    id: Uuid,
+    /// Registry that contains all the dynamic filter values in the current session.
+    registry: Arc<DynamicFiltersRegistry>,
     /// For testing purposes track the data type and nullability to make sure they don't change.
     /// If they do, there's a bug in the implementation.
     /// But this can have overhead in production, so it's only included in our tests.
@@ -133,14 +167,27 @@ impl DynamicFilterPhysicalExpr {
     pub fn new(
         children: Vec<Arc<dyn PhysicalExpr>>,
         inner: Arc<dyn PhysicalExpr>,
+        registry: Arc<DynamicFiltersRegistry>,
+        id: Option<Uuid>,
     ) -> Self {
+        let id = id.unwrap_or_else(Uuid::new_v4);
+        if !registry.entries.contains_key(&id) {
+            registry.entries.insert(id, Inner::new(inner));
+        }
         Self {
             children,
             remapped_children: None, // Initially no remapped children
-            inner: Arc::new(RwLock::new(Inner::new(inner))),
+            id,
+            registry,
             data_type: Arc::new(RwLock::new(None)),
             nullable: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Returns the unique identifier for this [DynamicFilterPhysicalExpr] in the
+    /// [DynamicFiltersRegistry].
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 
     fn remap_children(
@@ -174,14 +221,20 @@ impl DynamicFilterPhysicalExpr {
 
     /// Get the current generation of the expression.
     fn current_generation(&self) -> u64 {
-        self.inner.read().generation
+        self.registry
+            .get_or_err(&self.id)
+            .map_or(0, |v| v.generation)
     }
 
     /// Get the current expression.
     /// This will return the current expression with any children
     /// remapped to match calls to [`PhysicalExpr::with_new_children`].
     pub fn current(&self) -> Result<Arc<dyn PhysicalExpr>> {
-        let expr = Arc::clone(self.inner.read().expr());
+        let expr = {
+            let entry = self.registry.get_or_err(&self.id)?;
+            Arc::clone(entry.expr())
+            // <- drop the locked entry from the dashmap
+        };
         Self::remap_children(&self.children, self.remapped_children.as_ref(), expr)
     }
 
@@ -203,11 +256,9 @@ impl DynamicFilterPhysicalExpr {
         )?;
 
         // Load the current inner, increment generation, and store the new one
-        let mut current = self.inner.write();
-        *current = Inner {
-            generation: current.generation + 1,
-            expr: new_expr,
-        };
+        let mut inner = self.registry.get_mut_or_err(&self.id)?;
+        inner.generation += 1;
+        inner.expr = new_expr;
         Ok(())
     }
 
@@ -252,7 +303,8 @@ impl PhysicalExpr for DynamicFilterPhysicalExpr {
         Ok(Arc::new(Self {
             children: self.children.clone(),
             remapped_children: Some(children),
-            inner: Arc::clone(&self.inner),
+            id: self.id,
+            registry: Arc::clone(&self.registry),
             data_type: Arc::clone(&self.data_type),
             nullable: Arc::clone(&self.nullable),
         }))
@@ -329,7 +381,9 @@ impl PhysicalExpr for DynamicFilterPhysicalExpr {
 
     fn snapshot_generation(&self) -> u64 {
         // Return the current generation of the expression.
-        self.inner.read().generation
+        self.registry
+            .get_or_err(&self.id)
+            .map_or(0, |v| v.generation)
     }
 }
 
@@ -361,6 +415,8 @@ mod test {
         let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
             vec![col("a", &table_schema).unwrap()],
             expr as Arc<dyn PhysicalExpr>,
+            Default::default(),
+            None,
         ));
         // Simulate two `ParquetSource` files with different filter schemas
         // Both of these should hit the same inner `PhysicalExpr` even after `update()` is called
@@ -455,7 +511,12 @@ mod test {
     #[test]
     fn test_snapshot() {
         let expr = lit(42) as Arc<dyn PhysicalExpr>;
-        let dynamic_filter = DynamicFilterPhysicalExpr::new(vec![], Arc::clone(&expr));
+        let dynamic_filter = DynamicFilterPhysicalExpr::new(
+            vec![],
+            Arc::clone(&expr),
+            Default::default(),
+            None,
+        );
 
         // Take a snapshot of the current expression
         let snapshot = dynamic_filter.snapshot().unwrap();
@@ -472,7 +533,7 @@ mod test {
     #[test]
     fn test_dynamic_filter_physical_expr_misbehaves_data_type_nullable() {
         let dynamic_filter =
-            DynamicFilterPhysicalExpr::new(vec![], lit(42) as Arc<dyn PhysicalExpr>);
+            DynamicFilterPhysicalExpr::new(vec![], lit(42), Default::default(), None);
 
         // First call to data_type and nullable should set the initial values.
         let initial_data_type = dynamic_filter.data_type(&Schema::empty()).unwrap();

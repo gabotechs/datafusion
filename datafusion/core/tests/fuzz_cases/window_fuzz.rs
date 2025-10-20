@@ -646,7 +646,11 @@ async fn run_window_test(
     // For WindowAggExec  to produce correct result it need table to be ordered by b,a. Hence add a sort.
     if is_linear {
         if let Some(ordering) = LexOrdering::new(sort_keys) {
-            exec1 = Arc::new(SortExec::new(ordering, exec1)) as _;
+            exec1 = Arc::new(SortExec::new(
+                ordering,
+                exec1,
+                ctx.task_ctx().session_config().get_extension(),
+            )) as _;
         }
     }
 

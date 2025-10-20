@@ -759,8 +759,14 @@ mod tests {
         sort: LexOrdering,
         context: Arc<TaskContext>,
     ) -> RecordBatch {
-        let sort_exec =
-            Arc::new(SortExec::new(sort.clone(), input).with_preserve_partitioning(true));
+        let sort_exec = Arc::new(
+            SortExec::new(
+                sort.clone(),
+                input,
+                context.session_config().get_extension(),
+            )
+            .with_preserve_partitioning(true),
+        );
         sorted_merge(sort_exec, sort, context).await
     }
 
@@ -770,7 +776,11 @@ mod tests {
         context: Arc<TaskContext>,
     ) -> RecordBatch {
         let merge = Arc::new(CoalescePartitionsExec::new(src));
-        let sort_exec = Arc::new(SortExec::new(sort, merge));
+        let sort_exec = Arc::new(SortExec::new(
+            sort,
+            merge,
+            context.session_config().get_extension(),
+        ));
         let mut result = collect(sort_exec, context).await.unwrap();
         assert_eq!(result.len(), 1);
         result.remove(0)

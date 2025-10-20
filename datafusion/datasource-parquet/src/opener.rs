@@ -812,6 +812,8 @@ mod test {
         Arc::new(DynamicFilterPhysicalExpr::new(
             expr.children().into_iter().map(Arc::clone).collect(),
             expr,
+            Default::default(),
+            None,
         ))
     }
 

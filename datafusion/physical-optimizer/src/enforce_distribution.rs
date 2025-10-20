@@ -32,7 +32,6 @@ use crate::utils::{
 };
 
 use arrow::compute::SortOptions;
-use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -219,7 +218,7 @@ impl PhysicalOptimizerRule for EnforceDistribution {
         // Distribution enforcement needs to be applied bottom-up.
         let distribution_context = distribution_context
             .transform_up(|distribution_context| {
-                ensure_distribution(distribution_context, config_options)
+                ensure_distribution(distribution_context, config)
             })
             .data()?;
         Ok(distribution_context.plan)
@@ -1172,14 +1171,14 @@ fn get_repartition_requirement_status(
 /// source partitions may be later repartitioned with additional data exchange operators.
 pub fn ensure_distribution(
     dist_context: DistributionContext,
-    config: &ConfigOptions,
+    session_config: &SessionConfig,
 ) -> Result<Transformed<DistributionContext>> {
     let dist_context = update_children(dist_context)?;
 
     if dist_context.plan.children().is_empty() {
         return Ok(Transformed::no(dist_context));
     }
-
+    let config = session_config.options();
     let target_partitions = config.execution.target_partitions;
     // When `false`, round robin repartition will not be added to increase parallelism
     let enable_round_robin = config.optimizer.enable_round_robin_repartition;
@@ -1323,6 +1322,7 @@ pub fn ensure_distribution(
                                 .downcast_ref::<OutputRequirementExec>()
                                 .map(|output| output.fetch())
                                 .unwrap_or(None),
+                            &session_config.get_extension(),
                         )?;
                     }
                 }

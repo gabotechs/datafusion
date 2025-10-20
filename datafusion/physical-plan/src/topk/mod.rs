@@ -1142,7 +1142,12 @@ mod tests {
             runtime,
             &metrics,
             Arc::new(RwLock::new(TopKDynamicFilters::new(Arc::new(
-                DynamicFilterPhysicalExpr::new(vec![], lit(true)),
+                DynamicFilterPhysicalExpr::new(
+                    vec![],
+                    lit(true),
+                    Default::default(),
+                    None,
+                ),
             )))),
         )?;
 

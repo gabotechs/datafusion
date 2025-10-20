@@ -1261,7 +1261,7 @@ pub struct PhysicalExtensionNode {
 pub struct PhysicalExprNode {
     #[prost(
         oneof = "physical_expr_node::ExprType",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 19, 20"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 18, 19, 20, 21"
     )]
     pub expr_type: ::core::option::Option<physical_expr_node::ExprType>,
 }
@@ -1312,6 +1312,8 @@ pub mod physical_expr_node {
         Extension(super::PhysicalExtensionExprNode),
         #[prost(message, tag = "20")]
         UnknownColumn(super::UnknownColumn),
+        #[prost(message, tag = "21")]
+        DynamicFilter(::prost::alloc::boxed::Box<super::PhysicalDynamicFilterNode>),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1440,6 +1442,15 @@ pub struct PhysicalLikeExprNode {
     pub expr: ::core::option::Option<::prost::alloc::boxed::Box<PhysicalExprNode>>,
     #[prost(message, optional, boxed, tag = "4")]
     pub pattern: ::core::option::Option<::prost::alloc::boxed::Box<PhysicalExprNode>>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PhysicalDynamicFilterNode {
+    #[prost(message, repeated, tag = "1")]
+    pub children: ::prost::alloc::vec::Vec<PhysicalExprNode>,
+    #[prost(message, optional, boxed, tag = "2")]
+    pub inner: ::core::option::Option<::prost::alloc::boxed::Box<PhysicalExprNode>>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub id: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PhysicalSortExprNode {
@@ -1840,6 +1851,8 @@ pub struct SortExecNode {
     pub fetch: i64,
     #[prost(bool, tag = "4")]
     pub preserve_partitioning: bool,
+    #[prost(message, optional, tag = "5")]
+    pub filter: ::core::option::Option<PhysicalDynamicFilterNode>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SortPreservingMergeExecNode {

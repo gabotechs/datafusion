@@ -60,6 +60,7 @@ use datafusion_physical_plan::{
     ExecutionPlan,
 };
 
+use datafusion::execution::SessionStateBuilder;
 use datafusion_physical_plan::union::UnionExec;
 use futures::StreamExt;
 use object_store::{memory::InMemory, ObjectStore};
@@ -176,6 +177,14 @@ async fn test_dynamic_filter_pushdown_through_hash_join_with_topk() {
     use datafusion_common::JoinType;
     use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
 
+    let mut config = SessionConfig::default();
+    config
+        .options_mut()
+        .optimizer
+        .enable_dynamic_filter_pushdown = true;
+    config.options_mut().execution.parquet.pushdown_filters = true;
+    let session_state = SessionStateBuilder::new().with_config(config).build();
+
     // Create build side with limited values
     let build_batches = vec![record_batch!(
         ("a", Utf8, ["aa", "ab"]),
@@ -235,20 +244,17 @@ async fn test_dynamic_filter_pushdown_through_hash_join_with_topk() {
     let sort_expr =
         PhysicalSortExpr::new(col("e", &join_schema).unwrap(), SortOptions::default());
     let plan = Arc::new(
-        SortExec::new(LexOrdering::new(vec![sort_expr]).unwrap(), join)
-            .with_fetch(Some(2)),
+        SortExec::new(
+            LexOrdering::new(vec![sort_expr]).unwrap(),
+            join,
+            session_state.config().get_extension(),
+        )
+        .with_fetch(Some(2)),
     ) as Arc<dyn ExecutionPlan>;
-
-    let mut config = SessionConfig::default();
-    config
-        .options_mut()
-        .optimizer
-        .enable_dynamic_filter_pushdown = true;
-    config.options_mut().execution.parquet.pushdown_filters = true;
 
     // Apply the FilterPushdown optimizer rule
     let plan = FilterPushdown::new_post_optimization()
-        .optimize(Arc::clone(&plan), &config)
+        .optimize(Arc::clone(&plan), session_state.config())
         .unwrap();
 
     // Test that filters are pushed down correctly to each side of the join
@@ -677,6 +683,21 @@ fn test_node_handles_child_pushdown_result() {
 
 #[tokio::test]
 async fn test_topk_dynamic_filter_pushdown() {
+    let mut session_config = SessionConfig::default();
+    session_config
+        .options_mut()
+        .execution
+        .parquet
+        .pushdown_filters = true;
+    let config = SessionConfig::new().with_batch_size(2);
+    let session_ctx = SessionContext::new_with_config(config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
+
     let batches = vec![
         record_batch!(
             ("a", Utf8, ["aa", "ab"]),
@@ -703,6 +724,7 @@ async fn test_topk_dynamic_filter_pushdown() {
             )])
             .unwrap(),
             Arc::clone(&scan),
+            task_ctx.session_config().get_extension(),
         )
         .with_fetch(Some(1)),
     ) as Arc<dyn ExecutionPlan>;
@@ -723,23 +745,9 @@ async fn test_topk_dynamic_filter_pushdown() {
     );
 
     // Actually apply the optimization to the plan and put some data through it to check that the filter is updated to reflect the TopK state
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
     let plan = FilterPushdown::new_post_optimization()
         .optimize(plan, &session_config)
         .unwrap();
-    let config = SessionConfig::new().with_batch_size(2);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let mut stream = plan.execute(0, Arc::clone(&task_ctx)).unwrap();
     // Iterate one batch
     stream.next().await.unwrap().unwrap();
@@ -755,6 +763,21 @@ async fn test_topk_dynamic_filter_pushdown() {
 
 #[tokio::test]
 async fn test_topk_dynamic_filter_pushdown_multi_column_sort() {
+    let mut session_config = SessionConfig::default();
+    session_config
+        .options_mut()
+        .execution
+        .parquet
+        .pushdown_filters = true;
+    let config = SessionConfig::new().with_batch_size(2);
+    let session_ctx = SessionContext::new_with_config(config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
+
     let batches = vec![
         // We are going to do ORDER BY b ASC NULLS LAST, a DESC
         // And we put the values in such a way that the first batch will fill the TopK
@@ -790,6 +813,7 @@ async fn test_topk_dynamic_filter_pushdown_multi_column_sort() {
             ])
             .unwrap(),
             Arc::clone(&scan),
+            task_ctx.session_config().get_extension(),
         )
         .with_fetch(Some(2)),
     ) as Arc<dyn ExecutionPlan>;
@@ -810,23 +834,9 @@ async fn test_topk_dynamic_filter_pushdown_multi_column_sort() {
     );
 
     // Actually apply the optimization to the plan and put some data through it to check that the filter is updated to reflect the TopK state
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
     let plan = FilterPushdown::new_post_optimization()
         .optimize(plan, &session_config)
         .unwrap();
-    let config = SessionConfig::new().with_batch_size(2);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let mut stream = plan.execute(0, Arc::clone(&task_ctx)).unwrap();
     // Iterate one batch
     let res = stream.next().await.unwrap().unwrap();
@@ -900,6 +910,7 @@ async fn test_topk_filter_passes_through_coalesce_partitions() {
             )])
             .unwrap(),
             coalesce,
+            None,
         )
         .with_fetch(Some(1)),
     ) as Arc<dyn ExecutionPlan>;
@@ -957,6 +968,7 @@ async fn test_topk_filter_passes_through_coalesce_batches() {
             )])
             .unwrap(),
             coalesce_batches,
+            None,
         )
         .with_fetch(Some(1)),
     ) as Arc<dyn ExecutionPlan>;
@@ -982,6 +994,19 @@ async fn test_topk_filter_passes_through_coalesce_batches() {
 async fn test_hashjoin_dynamic_filter_pushdown() {
     use datafusion_common::JoinType;
     use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
+
+    let mut session_config = SessionConfig::default().with_batch_size(10);
+    let opts = session_config.options_mut();
+    opts.execution.parquet.pushdown_filters = true;
+    opts.optimizer.enable_dynamic_filter_pushdown = true;
+
+    let session_ctx = SessionContext::new_with_config(session_config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
 
     // Create build side with limited values
     let build_batches = vec![record_batch!(
@@ -1060,32 +1085,14 @@ async fn test_hashjoin_dynamic_filter_pushdown() {
     );
 
     // Actually apply the optimization to the plan and execute to see the filter in action
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
-    session_config
-        .options_mut()
-        .optimizer
-        .enable_dynamic_filter_pushdown = true;
     let plan = FilterPushdown::new_post_optimization()
-        .optimize(plan, &session_config)
+        .optimize(plan, task_ctx.session_config())
         .unwrap();
 
     // Test for https://github.com/apache/datafusion/pull/17371: dynamic filter linking survives `with_new_children`
     let children = plan.children().into_iter().map(Arc::clone).collect();
     let plan = plan.with_new_children(children).unwrap();
 
-    let config = SessionConfig::new().with_batch_size(10);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let mut stream = plan.execute(0, Arc::clone(&task_ctx)).unwrap();
     // Iterate one batch
     stream.next().await.unwrap().unwrap();
@@ -1105,6 +1112,18 @@ async fn test_hashjoin_dynamic_filter_pushdown() {
 async fn test_hashjoin_dynamic_filter_pushdown_partitioned() {
     use datafusion_common::JoinType;
     use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
+
+    let mut session_config = SessionConfig::default().with_batch_size(10);
+    let opts = session_config.options_mut();
+    opts.execution.parquet.pushdown_filters = true;
+    opts.optimizer.enable_dynamic_filter_pushdown = true;
+    let session_ctx = SessionContext::new_with_config(session_config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
 
     // Rough sketch of the MRE we're trying to recreate:
     // COPY (select i as k from generate_series(1, 10000000) as t(i))
@@ -1261,6 +1280,7 @@ async fn test_hashjoin_dynamic_filter_pushdown_partitioned() {
         )])
         .unwrap(),
         cp,
+        task_ctx.session_config().get_extension(),
     )) as Arc<dyn ExecutionPlan>;
 
     // expect the predicate to be pushed down into the probe side DataSource
@@ -1295,27 +1315,9 @@ async fn test_hashjoin_dynamic_filter_pushdown_partitioned() {
     );
 
     // Actually apply the optimization to the plan and execute to see the filter in action
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
-    session_config
-        .options_mut()
-        .optimizer
-        .enable_dynamic_filter_pushdown = true;
     let plan = FilterPushdown::new_post_optimization()
-        .optimize(plan, &session_config)
+        .optimize(plan, task_ctx.session_config())
         .unwrap();
-    let config = SessionConfig::new().with_batch_size(10);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let batches = collect(Arc::clone(&plan), Arc::clone(&task_ctx))
         .await
         .unwrap();
@@ -1381,6 +1383,18 @@ async fn test_hashjoin_dynamic_filter_pushdown_partitioned() {
 async fn test_hashjoin_dynamic_filter_pushdown_collect_left() {
     use datafusion_common::JoinType;
     use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
+
+    let mut session_config = SessionConfig::new().with_batch_size(10);
+    let opts = session_config.options_mut();
+    opts.execution.parquet.pushdown_filters = true;
+    opts.optimizer.enable_dynamic_filter_pushdown = true;
+    let session_ctx = SessionContext::new_with_config(session_config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
 
     let build_batches = vec![record_batch!(
         ("a", Utf8, ["aa", "ab"]),
@@ -1469,6 +1483,7 @@ async fn test_hashjoin_dynamic_filter_pushdown_collect_left() {
         )])
         .unwrap(),
         cp,
+        task_ctx.session_config().get_extension(),
     )) as Arc<dyn ExecutionPlan>;
 
     // expect the predicate to be pushed down into the probe side DataSource
@@ -1499,27 +1514,9 @@ async fn test_hashjoin_dynamic_filter_pushdown_collect_left() {
     );
 
     // Actually apply the optimization to the plan and execute to see the filter in action
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
-    session_config
-        .options_mut()
-        .optimizer
-        .enable_dynamic_filter_pushdown = true;
     let plan = FilterPushdown::new_post_optimization()
-        .optimize(plan, &session_config)
+        .optimize(plan, task_ctx.session_config())
         .unwrap();
-    let config = SessionConfig::new().with_batch_size(10);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let batches = collect(Arc::clone(&plan), Arc::clone(&task_ctx))
         .await
         .unwrap();
@@ -1565,6 +1562,19 @@ async fn test_hashjoin_dynamic_filter_pushdown_collect_left() {
 async fn test_nested_hashjoin_dynamic_filter_pushdown() {
     use datafusion_common::JoinType;
     use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
+
+    let mut session_config = SessionConfig::default().with_batch_size(10);
+    let opts = session_config.options_mut();
+    opts.execution.parquet.pushdown_filters = true;
+    opts.optimizer.enable_dynamic_filter_pushdown = true;
+
+    let session_ctx = SessionContext::new_with_config(session_config);
+    session_ctx.register_object_store(
+        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
+        Arc::new(InMemory::new()),
+    );
+    let state = session_ctx.state();
+    let task_ctx = state.task_ctx();
 
     // Create test data for three tables: t1, t2, t3
     // t1: small table with limited values (will be build side of outer join)
@@ -1678,27 +1688,9 @@ async fn test_nested_hashjoin_dynamic_filter_pushdown() {
     );
 
     // Execute the plan to verify the dynamic filters are properly updated
-    let mut session_config = SessionConfig::default();
-    session_config
-        .options_mut()
-        .execution
-        .parquet
-        .pushdown_filters = true;
-    session_config
-        .options_mut()
-        .optimizer
-        .enable_dynamic_filter_pushdown = true;
     let plan = FilterPushdown::new_post_optimization()
-        .optimize(outer_join, &session_config)
+        .optimize(outer_join, task_ctx.session_config())
         .unwrap();
-    let config = SessionConfig::new().with_batch_size(10);
-    let session_ctx = SessionContext::new_with_config(config);
-    session_ctx.register_object_store(
-        ObjectStoreUrl::parse("test://").unwrap().as_ref(),
-        Arc::new(InMemory::new()),
-    );
-    let state = session_ctx.state();
-    let task_ctx = state.task_ctx();
     let mut stream = plan.execute(0, Arc::clone(&task_ctx)).unwrap();
     // Execute to populate the dynamic filters
     stream.next().await.unwrap().unwrap();

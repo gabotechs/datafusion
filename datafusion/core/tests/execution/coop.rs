@@ -330,7 +330,11 @@ async fn sort_yields(
     );
 
     let lex_ordering = LexOrdering::new(vec![sort_expr]).unwrap();
-    let sort_exec = Arc::new(SortExec::new(lex_ordering, inf.clone()));
+    let sort_exec = Arc::new(SortExec::new(
+        lex_ordering,
+        inf.clone(),
+        session_ctx.task_ctx().session_config().get_extension(),
+    ));
 
     query_yields(sort_exec, session_ctx.task_ctx()).await
 }
